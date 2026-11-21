@@ -16,7 +16,7 @@ HEADER = struct.Struct("!BI")
 HEADER_SIZE = HEADER.size
 PAYLOAD_SIZE = homework5.MAX_PACKET - HEADER_SIZE
 
-DATA, ACK, FIN, FINACK, BYE = 0, 1, 2, 3, 4
+DATA, ACK, FIN = 0, 1, 2
 
 RTO_FLOAT = struct.Struct("!d")
 
@@ -26,7 +26,7 @@ INITIAL_RTO = 1.0
 MIN_MARGIN = 0.01   
 MAX_RTO = 4.0
 FIN_RETRIES = 8      
-FINACK_RETRIES = 4    
+LINGER_FACTOR = 2.5
 
 
 def make_packet(ptype: int, seq: int, payload: bytes = b"") -> bytes:
@@ -69,7 +69,7 @@ def send(sock: socket.socket, data: bytes):
                 over a simulated lossy network.
         data -- A bytes object, containing the data to send over the network.
     """
-    
+
     logger = homework5.logging.get_logger("hw5-sender")
     rtt = RttEstimator()
 
@@ -118,8 +118,7 @@ def send(sock: socket.socket, data: bytes):
         seq += 1
 
     fin = make_packet(FIN, seq, RTO_FLOAT.pack(rtt.rto))
-    if send_and_wait(fin, FINACK, seq, max_tries=FIN_RETRIES):
-        sock.send(make_packet(BYE, seq))
+    send_and_wait(fin, ACK, seq, max_tries=FIN_RETRIES)
     logger.info("Sender done")
 
 
@@ -165,36 +164,21 @@ def recv(sock: socket.socket, dest: io.BufferedIOBase) -> int:
                 sender_rto = RTO_FLOAT.unpack_from(payload)[0]
             break
 
- 
-    wait = min(max(sender_rto * 1.5, 0.05), MAX_RTO)
-    sock.send(make_packet(FINACK, expected))
-    tries = 1
-    deadline = time.time() + wait
+    linger = min(max(sender_rto * LINGER_FACTOR, 0.05), MAX_RTO)
+    sock.send(make_packet(ACK, expected))
     while True:
-        remaining = deadline - time.time()
-        if remaining <= 0:
-            if tries >= FINACK_RETRIES:
-                break
-            sock.send(make_packet(FINACK, expected))
-            tries += 1
-            deadline = time.time() + wait
-            continue
-        sock.settimeout(remaining)
+        sock.settimeout(linger)
         try:
             raw = sock.recv(homework5.MAX_PACKET)
         except socket.timeout:
-            continue
+            break
         except OSError:
             continue
         parsed = parse_packet(raw)
         if parsed is None:
             continue
         ptype, seq, _ = parsed
-        if ptype == BYE:
-            break
-        if ptype == FIN:
-            sock.send(make_packet(FINACK, expected))
-        elif ptype == DATA and seq < expected:
+        if ptype == FIN or (ptype == DATA and seq < expected):
             sock.send(make_packet(ACK, seq))
 
     logger.info("Receiver done, %d bytes", num_bytes)
